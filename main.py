@@ -129,18 +129,30 @@ def gen_synth(T=32, U=12, G=5, seed=7) -> Scenario:
     g_pos = np.random.RandomState(seed+1).rand(G, 2) * 1000.0
     for t in range(T):
         uav = []
+        """
+        UAV: rappresenta un drone (o nodo mobile). Ha 3 feature generiche (numeri reali) chiamate f1, f2, f3.
+        f1 = backlog (quanto traffico ha in coda), f2 = deadline (entro quanto deve consegnare), f3 = speed (velocità istantanea).
+        """
         for u in range(U):
             u_pos[u] += np.random.randn(2) * 15.0             # passo casuale
             backlog = max(0.0, np.random.normal(150.0, 60.0)) # dati in coda
             deadline = max(1.0, np.random.uniform(1.0, 6.0))  # finestra temporale
             speed = float(np.linalg.norm(np.random.randn(2) * 5.0))
             uav.append(UAV(id=f"u{u}", f1=backlog, f2=deadline, f3=speed))
+        """
+        GS: rappresenta una stazione a terra. Ha 3 campi: 
+        c1 = capacity residua (quanto può ancora ricevere), c2 = latenza base, c3 = queue (quanto ha già in attesa).
+        """
         gs = []
         for g in range(G):
             cap = max(30.0, np.random.normal(120.0, 30.0))    # capacità residua
             lat = max(5.0, np.random.normal(20.0, 8.0))       # latenza base
             q   = max(0.0, np.random.normal(20.0, 10.0))      # coda GS
             gs.append(GS(id=f"g{g}", c1=cap, c2=lat, c3=q))
+        """
+        Link: rappresenta un collegamento UAV–GS.
+        Ha w1 = distanza (proxy di path-loss/costo energetico) e w2 = bitrate stimato (capacità del canale nello slot).
+        """
         links = []
         for u in range(U):
             for g in range(G):
@@ -148,6 +160,10 @@ def gen_synth(T=32, U=12, G=5, seed=7) -> Scenario:
                 rate = max(1.0, 320.0 - 0.25 * dist + np.random.randn()*3.0)
                 links.append(Link(uav_id=f"u{u}", gs_id=f"g{g}", w1=dist, w2=rate))
         slots.append(Slot(t=t, uav=uav, gs=gs, links=links))
+        """
+        Slot: istantanea della rete a un tempo t. Contiene liste di UAV, GS e Link validi in quello slot.
+        Scenario: collezione di più Slot (quindi l’evoluzione temporale della rete), con eventuali metadati (meta).
+        """
     return Scenario(meta={"name": "synth"}, slots=slots)
 
 
@@ -155,6 +171,48 @@ def gen_synth(T=32, U=12, G=5, seed=7) -> Scenario:
 # = CAPITOLO 3 · VALIDAZIONE DI SANITY CHECK =
 # ===========================================
 
+"""
+
+Uno Slot rappresenta un istante temporale della simulazione e contiene tre liste. 
+La relazione UAV-GS è archiviata nella lista links dentro ogni slot
+Tanti slot messi insieme formano lo Scenario. Per sapere sapere 
+“quali UAV possono parlare con quali GS al tempo t”, vai in Scenario.slots[i].links: lì trovi tutti gli archi validi di quel momento.
+
+ESEMPIO DI SCENARIO
+{
+  "meta": {
+    "name": "test",
+    "seed": "123"
+  },
+  "slots": [
+    {
+      "t": 0,
+      "uav": [
+        { "id": "u1", "f1": 120.0, "f2": 3.0, "f3": 10.5 },
+        { "id": "u2", "f1": 80.0,  "f2": 2.0, "f3": 5.0  }
+      ],
+      "gs": [
+        { "id": "g1", "c1": 100.0, "c2": 10.0, "c3": 5.0 },
+        { "id": "g2", "c1": 80.0,  "c2": 20.0, "c3": 2.0 }
+      ],
+      "links": [
+        { "uav_id": "u1", "gs_id": "g1", "w1": 300.0, "w2": 150.0 },
+        { "uav_id": "u1", "gs_id": "g2", "w1": 500.0, "w2": 90.0  },
+        { "uav_id": "u2", "gs_id": "g1", "w1": 250.0, "w2": 120.0 }
+      ]
+    }
+  ]
+}
+
+Un slot è come una fotografia della rete in un certo istante: contiene l’elenco dei droni, delle stazioni 
+e dei collegamenti ammessi. La validazione serve per controllare che non ci siano riferimenti rotti.
+- validate_slot: dentro a uno slot, ogni link deve collegare solo id che esistono.
+- validate_scenario: su tutto lo scenario, assicura che ogni timestamp sia unico e che ogni slot superi la validazione locale.
+- validate_submission: controlla che la mappa proposta (uav → gs o NO_TX) rispetti l’universo di quello slot:
+- non usa id di UAV o GS inesistenti,
+- se sceglie un GS, la coppia UAV–GS deve essere tra quelle dichiarate in links.
+
+"""
 def validate_slot(slot: Slot) -> Optional[str]:
     """Verifica coerenza referenziale degli ID in un singolo slot."""
     uids = {u.id for u in slot.uav}
@@ -173,71 +231,138 @@ def validate_slot(slot: Slot) -> Optional[str]:
 
 class DataComEnv:
     """
-    Simulatore a slot singolo con reward:
+    Simulatore a slot singolo con reward. Funzione obiettivo:
     reward = α·throughput − β·latency − γ·distance − δ·handover − penalty·violations
     - throughput: somma dei dati serviti (min(backlog, bitrate))
     - latency: proxy = base-latency GS + backlog residuo ponderato
     - distance: somma distanze link scelti (proxy di costo/path-loss)
     - handover: conteggio cambi GS per lo stesso UAV, memoria rapida
     - violations: assegnamenti che sforano la capacità GS
+
+    Uno slot è la fotografia della rete in quell'istante t. Una mappa (mapping) invece è l'azione che prendi su quello slot.
+
+    ESEMPIO
+    È un dizionario Python {uav_id: gs_id} valido solo per quello slot. Per ogni UAV dici a quale GS si collega, oppure NO_TX se resta silente.
+    slot = {
+      "t": 0,
+      "uav": ["u1","u2"],
+      "gs": ["g1","g2"],
+      "links": [("u1","g1"), ("u1","g2"), ("u2","g2")]
+    }
+    mapping = {
+      "u1": "g2",
+      "u2": "g2"
+    }
+    scopo: dato uno slot (stato di rete a tempo t) e una mappa {uav_id → gs_id | NO_TX}, calcola metriche e reward.
     """
     def __init__(self, alpha=1.0, beta=0.02, gamma=0.0015, delta=0.3, penalty=50.0):
+        # costruttore degli iperparametri
         self.alpha = alpha
         self.beta  = beta
         self.gamma = gamma
         self.delta = delta
         self.penalty = penalty
+        # memoria per UAV dell’ultima GS usata. serve a contare un handover quando cambi GS tra due step consecutivi
         self.prev_choice: Dict[str, str] = {}  # memorizza GS scelto nello slot precedente per conteggiare handover
 
+    # API centrale: input = fotografia del tempo t + decisioni per quel t; output = reward (float) e tutte le metriche in un dict.
     def step(self, slot: Slot, mapping: Dict[str, str]) -> Tuple[float, Dict[str, float]]:
-        # capacità residua (unità astratte)
+        # capacità residua (con sanity check)
         gs_capacity = {g.id: max(1.0, g.c1) for g in slot.gs}
-        # indicizzazione rapida dei link reali
+        # indice hash per trovare in O(1) il link selezionato da una coppia (uav, gs). evita ricerche lineari ogni volta. complessità O(|E|) per costruzione.
         link_map: Dict[Tuple[str, str], Link] = {(lk.uav_id, lk.gs_id): lk for lk in slot.links}
 
+        # accumulatori metriche, li sommerà su tutti gli UAV nello slot
         throughput = 0.0
         latency = 0.0
         dist_sum = 0.0
         handovers = 0.0
         violations = 0.0
-
+        # loop sugli UAV dello slot (dimensione |U|). ordine non influisce sulla correttezza, ma influenza chi consuma capacità prima (è deterministico).
         for u in slot.uav:
+            # mapping è la mappa delle scelte per uno slot (tipo {"u1":"g2","u2":"NO_TX"}). con .get(u.id,"NO_TX") chiedi: “per l’UAV u.id, quale GS è stato scelto? quindi ch è la stazione scelta oppure "NO_TX" se non trasmette.
             ch = mapping.get(u.id, "NO_TX")
             if ch == "NO_TX":
                 continue
+            # link_map è un dizionario con chiave (uav_id, gs_id) e valore l’oggetto Link. quindi qui sta cercando: “c’è un link valido tra questo UAV e la GS che ho scelto?”. se non lo trova, ritorna None, cioè link inesistente
             lk = link_map.get((u.id, ch), None)
             if lk is None:
                 violations += 1.0
                 continue
 
             # consumo di capacità proporzionale al bitrate usato (scala arbitraria)
+            """
+            qui si calcola quanto consumo di capacità richiede questo link. lk.w2 è il bitrate stimato del link (quanti dati al massimo può passare nello slot). 
+            lo divide per 40.0 per portarlo sulla stessa scala della capacità c1 delle GS. 
+            quindi se il link ha w2=200, il consumo sarà 5 unità di capacità. questo numero sarà confrontato con la capacità residua della GS
+            40.0 è un fattore di scala arbitrario preso ad hoc. Se confrontassi direttamente c1 (tipo 120) con w2 (tipo 250), ogni UAV saturerebbe subito la GS → la simulazione non funzionerebbe.
+            """
             cons = lk.w2 / 40.0
+            """
+            qui controlla: la GS ch ha abbastanza capacità residua (gs_capacity[ch]) per sopportare questo consumo cons?
+            - gs_capacity era un dizionario {gs_id → capacità disponibile} inizializzato con c1.
+            – se il link ha passato il controllo, vuol dire che c’è spazio; quindi ora sottrae cons (il consumo calcolato da w2/40) al budget di quella GS.
+            così, se un altro UAV prova ad agganciarsi alla stessa GS nello stesso slot, troverà meno risorse disponibili.
+            """
             if gs_capacity[ch] - cons < -1e-6:
                 violations += 1.0
                 continue
             gs_capacity[ch] -= cons
-
+            """
+            calcola quanti dati effettivamente serviti può trasmettere questo UAV in questo slot.
+            – u.f1 è il backlog del drone (quanti dati ha in coda).
+            – lk.w2 è il bitrate stimato del link (quanto al massimo può passare).
+            la realtà è limitata dal più piccolo dei due: se il drone ha solo 50 dati ma il link può trasmettere 200, ne manda solo 50. se invece ha 300 dati ma il link regge 150, ne trasmette 150.
+            """
             # throughput servito nello slot
             served = min(u.f1, lk.w2)
+            """
+            accumula nel totale di slot il traffico servito da questo UAV. 
+            Alla fine, throughput sarà la somma di tutti i dati trasmessi da tutti gli UAV dello slot. è la parte “positiva” della reward (α·throughput).
+            """
             throughput += served
 
             # latenza proxy: latenza base GS + backlog residuo ponderato
+            """
+            ch è l’id della stazione di terra scelta per quell’UAV in quell’istante.
+            il codice deve prendere l’oggetto GS corrispondente dentro lo slot, 
+            perché la lista slot.gs contiene tutte le stazioni disponibili in quel tempo con le loro proprietà (c1 capacità, c2 latenza base, c3 coda).
+            se ch="g2", ti ritorna l’oggetto GS(id="g2", c1=..., c2=..., c3=...).
+            – così puoi accedere a g_obj.c2, cioè la latenza base della stazione.
+            """
             g_obj = next(g for g in slot.gs if g.id == ch)
+            """
+            – g_obj.c2 è la latenza “intrinseca” della GS scelta.
+            – max(1.0, g_obj.c2) significa: anche se c2 è 0 o negativo (per come sono generati i dati), conta almeno 1.
+            – u.f1 - served è il backlog rimasto al drone dopo aver trasmesso. se è >0, moltiplicato per 0.05 aggiunge un costo di coda.
+            """
             latency += (max(1.0, g_obj.c2) + max(0.0, u.f1 - served) * 0.05)
-
+            """
+            lk è il link tra quell’UAV e la GS scelta. lk.w1 è la distanza (proxy del path-loss). 
+            la sommi al totale. più è grande, più la reward finale sarà penalizzata dal termine -γ*distance.
+            """
             # distanza/costo
             dist_sum += lk.w1
 
-            # handover (cambio GS rispetto allo slot precedente)
+            """
+            handover (cambio GS rispetto allo slot precedente)
+            controlla se l’UAV ha cambiato GS rispetto allo slot precedente. Usa get(..., ch) per non contare il primo slot; 
+            se esiste una scelta precedente diversa da ch, incrementa l’handover.
+            """
             if self.prev_choice.get(u.id, ch) != ch and u.id in self.prev_choice:
                 handovers += 1.0
-
+        # combina le metriche con i pesi; throughput aiuta, gli altri termini sottraggono.
         reward = (self.alpha * throughput
                   - self.beta * latency
                   - self.gamma * dist_sum
                   - self.delta * handovers
                   - self.penalty * violations)
-
+        """
+        sta succedendo questo: per ogni UAV nello slot attuale, il simulatore salva da qualche parte quale GS gli hai assegnato (oppure "NO_TX"). 
+        Questo “archivio” si chiama prev_choice ed è un dizionario interno all’oggetto DataComEnv.
+        Perché serve? Perché nello slot successivo (tempo t+1), quando ricalcoli le metriche, ti devi accorgere se un UAV ha cambiato GS rispetto allo slot precedente. 
+        Quel cambiamento è un handover e viene penalizzato nella reward.
+        """
         self.prev_choice = {u.id: mapping.get(u.id, "NO_TX") for u in slot.uav}
         info = dict(throughput=throughput, latency=latency, distance=dist_sum,
                     handover=handovers, violations=violations, reward=reward)
@@ -255,19 +380,26 @@ def greedy_policy(slot: Slot, cap_scale: float = 40.0) -> Dict[str, str]:
     - assegna rispettando capacità residua (c1/cap_scale).
     Ritorna una mappatura ammissibile o NO_TX se impossibile.
     """
+    """
+    costruisce un indice per UAV: per ogni drone raccoglie la sua lista di link disponibili nello slot. così eviti di scandire tutti i link quando processi un singolo UAV.
+    """
     links_by_u: Dict[str, List[Link]] = {}
     for lk in slot.links:
         links_by_u.setdefault(lk.uav_id, []).append(lk)
-
+    """
+    inizializza la capacità residua per ogni GS, già divisa per cap_scale; se c1 fosse ≤0 la forza a 1.0. lavorerai sempre in queste “unità normalizzate”.
+    """
     gs_left = {g.id: max(1.0, g.c1)/cap_scale for g in slot.gs}
+    # prepara il contenitore dell’output: qui metterai uav_id → gs_id o NO_TX.
     decision: Dict[str, str] = {}
 
-    for u in slot.uav:
+    for u in slot.uav: #itera gli UAV nello slot in un ordine deterministico (quello della lista). chi arriva prima consuma prima.
         cands = links_by_u.get(u.id, [])
         if not cands:
             decision[u.id] = "NO_TX"; continue
-        # ordina per (rate/dist)
+        # recupera i link disponibili per quell’UAV; se non ne ha, assegna NO_TX e passa oltre.
         cands.sort(key=lambda e: (e.w2 / (e.w1+1.0)), reverse=True)
+        # ordina i candidati per utilità “grezza”: bitrate alto e distanza bassa. il +1.0 evita divisioni per zero; reverse=True mette prima i migliori.
         chosen = "NO_TX"
         for e in cands:
             need = e.w2 / cap_scale
@@ -275,6 +407,10 @@ def greedy_policy(slot: Slot, cap_scale: float = 40.0) -> Dict[str, str]:
                 gs_left[e.gs_id] -= need
                 chosen = e.gs_id
                 break
+        """
+        scorre i candidati in ordine di utilità e prende il primo che “sta dentro” la capacità residua della sua GS.
+        Se entra: scala la capacità residua di quella GS e fissa chosen a quel gs_id, poi esce dal ciclo. se nessuno entra, resterà NO_TX.
+        """
         decision[u.id] = chosen
     return decision
 
@@ -282,15 +418,22 @@ def greedy_policy(slot: Slot, cap_scale: float = 40.0) -> Dict[str, str]:
 # =======================================
 # = CAPITOLO 6 · SAFETY LAYER (PROIEZIONE)
 # =======================================
-
+"""
+- slot: la fotografia della rete (UAV, GS e link).
+- probs: per ogni UAV, la lista di etichette (GS o NO_TX) con la probabilità stimata da una policy (neurale o altro).
+- cap_scale: lo stesso fattore di normalizzazione visto in greedy.
+- return: una mappa uav_id → gs_id|NO_TX, cioè le scelte finali da passare al simulatore.
+"""
 def safety_project(slot: Slot,
                    probs: Dict[str, List[Tuple[str,float]]],
                    cap_scale: float = 40.0) -> Dict[str, str]:
     """
+    safety_project è un filtro che trasforma le probabilità della policy in scelte effettive, rispettando i vincoli dello scenario.
     Proiezione greedy delle scelte della policy entro i vincoli di capacità GS:
     - probs: per ogni UAV, lista di (gs_id|NO_TX, probabilità)
     - si prova in ordine di probabilità decrescente finché la capacità del GS lo consente
     """
+    "Crea un dizionario che dice quanta capacità residua ha ogni GS in “unità normalizzate”. È come una scorta che verrà scalata ogni volta che un UAV viene assegnato a quella GS."
     gs_left = {g.id: max(1.0, g.c1)/cap_scale for g in slot.gs}
     link_map = {(lk.uav_id, lk.gs_id): lk for lk in slot.links}
     decision: Dict[str, str] = {}

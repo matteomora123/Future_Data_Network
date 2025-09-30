@@ -469,45 +469,46 @@ Senza PyG, implementiamo un layer "edge-centric":
 - Per ciascun UAV si fa una softmax sui logits dei propri archi + 1 logit NO_TX (calcolato da featU)
 Risultato: per UAV una distribuzione su {GS valiti, NO_TX}.
 """
-
+#  Funzione d’appoggio: prende lo Slot e lo traduce in tensori PyTorch.
 def pack_features(slot: Slot) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                                        Dict[str,int], Dict[str,int], List[Tuple[int,int]]]:
+    # Crea due dizionari che associano ogni id stringa (es. "u1", "g3") a un indice intero. Servono a referenziare nodi nei tensori.
     u_ids = {u.id: i for i,u in enumerate(slot.uav)}
     g_ids = {g.id: i for i,g in enumerate(slot.gs)}
-    u_feat = torch.tensor([[u.f1, u.f2, u.f3] for u in slot.uav], dtype=torch.float32)
-    g_feat = torch.tensor([[g.c1, g.c2, g.c3] for g in slot.gs], dtype=torch.float32)
-    e_feat = torch.tensor([[lk.w1, lk.w2] for lk in slot.links], dtype=torch.float32)
-    edge_index: List[Tuple[int,int]] = [(u_ids[lk.uav_id], g_ids[lk.gs_id]) for lk in slot.links]
-    return u_feat, g_feat, e_feat, u_ids, g_ids, edge_index
+    u_feat = torch.tensor([[u.f1, u.f2, u.f3] for u in slot.uav], dtype=torch.float32) # Matrice [#UAV, 3] con le feature degli UAV (backlog, deadline, velocità).
+    g_feat = torch.tensor([[g.c1, g.c2, g.c3] for g in slot.gs], dtype=torch.float32) # Matrice [#GS, 3] con le feature delle GS (capacità, latenza base, queue).
+    e_feat = torch.tensor([[lk.w1, lk.w2] for lk in slot.links], dtype=torch.float32) # Matrice [#link, 2] con le feature degli archi (distanza, bitrate).
+    edge_index: List[Tuple[int,int]] = [(u_ids[lk.uav_id], g_ids[lk.gs_id]) for lk in slot.links] # Lista di coppie (indice_UAV, indice_GS) per ogni link, allineata a e_feat.
+    return u_feat, g_feat, e_feat, u_ids, g_ids, edge_index # Ritorna i tensori e le mappe.
 
 
 class EdgeNet(nn.Module):
-    """MLP sugli archi del grafo bipartito + logit NO_TX per ogni UAV."""
-    def __init__(self, dU=3, dG=3, dE=2, dh=128):
+       def __init__(self, dU=3, dG=3, dE=2, dh=128): # Costruttore: specifica dimensioni delle feature e dei layer nascosti.
         super().__init__()
-        self.edge_mlp = nn.Sequential(
+        self.edge_mlp = nn.Sequential( #MLP che prende la concatenazione [feat(U) || feat(G) || feat(link)] e produce un logit scalare per quell’arco. Serve a dire “quanto è buona questa connessione”.
             nn.Linear(dU+dG+dE, dh), nn.ReLU(),
             nn.Linear(dh, dh), nn.ReLU(),
             nn.Linear(dh, 1)
         )
-        self.notx_mlp = nn.Sequential(
+        self.notx_mlp = nn.Sequential( #MLP separato che prende solo le feature UAV e produce il logit per l’opzione NO_TX.
             nn.Linear(dU, dh//2), nn.ReLU(),
             nn.Linear(dh//2, 1)
         )
 
     def forward(self, slot: Slot) -> Tuple[Dict[str,List[Tuple[str,float]]], Dict[str,torch.Tensor]]:
+        #
         """
         Ritorna:
           - probs_dict: per UAV -> [(gs_id o NO_TX, p), ...]
           - raw_logits_store: per UAV -> tensor logits (GS..., NO_TX) PRIMA della softmax
         """
-        u_feat, g_feat, e_feat, u_ids, g_ids, edge_index = pack_features(slot)
+        u_feat, g_feat, e_feat, u_ids, g_ids, edge_index = pack_features(slot) #Converte lo slot in tensori e mappe.
 
-        # caso limite: nessun arco disponibile nello slot
+        # Caso limite: se non ci sono link in questo slot, tutti gli UAV sono forzati a NO_TX
         if len(edge_index) == 0:
             probs_dict = {uid: [("NO_TX", 1.0)] for uid in u_ids.keys()}
             return probs_dict, {}
-
+        # Estrae indici UAV e GS per ogni arco.
         u_idx = torch.tensor([ui for ui,_ in edge_index], dtype=torch.long)
         g_idx = torch.tensor([gi for _,gi in edge_index], dtype=torch.long)
 
@@ -515,18 +516,25 @@ class EdgeNet(nn.Module):
         x  = torch.cat([u_feat[u_idx], g_feat[g_idx], e_feat], dim=-1)  # [E, dU+dG+dE]
         edge_logits = self.edge_mlp(x).squeeze(-1)                      # [E]
 
-        # raggruppa logits per UAV
+        # Raggruppa i logits per UAV: ogni UAV ha lista di (GS, logit).
         per_u_edges: Dict[int, List[Tuple[int, float]]] = {}
         for k,(ui,gi) in enumerate(edge_index):
             per_u_edges.setdefault(ui, []).append((gi, float(edge_logits[k].item())))
 
-        # logit addizionale per NO_TX basato su feature del UAV
+        # Calcola logit NO_TX per ciascun UAV (logit addizionale per NO_TX basato su feature del UAV)
         logit_no = self.notx_mlp(u_feat).squeeze(-1)      # [U]
-
+        # Prepara i dizionari di output.
         probs_dict: Dict[str, List[Tuple[str,float]]] = {}
         raw_logits_store: Dict[str, torch.Tensor] = {}
 
         # costruiamo softmax per-UAV su (GS... + NO_TX)
+        """
+        Per ogni UAV:
+        - raccoglie i logits degli archi + il logit NO_TX,
+        - calcola la softmax per ottenere probabilità,
+        - abbina le probabilità alle etichette GS/NO_TX,
+        - salva i logits grezzi (servono per calcolare la loss).
+        """
         for uid, ui in u_ids.items():
             pairs = per_u_edges.get(ui, [])
             logits = torch.tensor([s for _, s in pairs] + [float(logit_no[ui].item())], dtype=torch.float32)
@@ -534,7 +542,7 @@ class EdgeNet(nn.Module):
             labels = [f"g{gi}" for gi,_ in pairs] + ["NO_TX"]  # nomi GS derivati dagli indici locali
             probs_dict[uid] = list(zip(labels, p))
             raw_logits_store[uid] = logits
-
+        # Ritorna le probabilità (per inferenza o safety_project) e i logits (per il training).
         return probs_dict, raw_logits_store
 
 
@@ -545,14 +553,22 @@ class PPOPolicy(nn.Module):
     - Value head (critic): valuta lo stato con un embedding globale “leggero”
       (media delle feature di tutti i UAV e di tutti i GS).
     """
+    """
+    La classe PPOPolicy contiene un’istanza di EdgeNet come suo “pezzo attore” e serve all’algoritmo PPO: ha bisogno sia dell’actor (self.net) sia di un critic (self.v_mlp).
+    EdgeNet è la rete che produce, per ogni UAV, le probabilità di scelta (actor).
+    MLP sugli archi del grafo bipartito + logit NO_TX per ogni UAV."""
     def __init__(self):
         super().__init__()
         self.net = EdgeNet()
         self.v_mlp = nn.Sequential(
-            nn.Linear(3+3, 128), nn.ReLU(),
-            nn.Linear(128, 1)
+            nn.Linear(3+3, 128), nn.ReLU(), # policy.forward_policy(slot) → chiama self.net(slot) → quindi usa EdgeNet.
+            nn.Linear(128, 1) # policy.forward_value(slot) → passa dallo v_mlp, cioè il critic.
         )
-
+    """
+    Così PPOPolicy racchiude tutto quello che serve al reinforcement learning:
+    - la parte che sceglie (actor = EdgeNet),
+    - la parte che valuta (critic = v_mlp).
+    """
     def forward_policy(self, slot: Slot):
         return self.net(slot)
 

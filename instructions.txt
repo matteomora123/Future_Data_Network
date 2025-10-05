@@ -1,0 +1,57 @@
+**ISTRUZIONI OPERATIVE — DATASET NWPU MULTI-CHANNEL, TRAINING E INFERENZA (LOCO)**
+
+**Directory di lavoro:**
+`C:\Users\matte\PycharmProjects\Future_Data_Network`
+
+**Verifica ambiente (una sola volta):**
+`python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`
+
+---
+
+**1. Scansione dataset**
+Da `dataset_addestramento`:
+`python scan_dataset.py --root "C:\Users\matte\PycharmProjects\Future_Data_Network\Data_set" --sample-items 4`
+→ riepiloga cartelle (`Environment#`, `Flying_*`, `ch#`) e conteggi.
+
+---
+
+**2. Generazione scenari JSON (Environment0)**
+
+* **File separati (ch2, ch3):**
+  `python prepare_env0_nwpu.py --root "C:\Users\matte\PycharmProjects\Future_Data_Network\Data_set" --flight Flying_straight --channels 2,3 --merge per_ch --out "dataset_addestramento\scenario_env0.json"`
+
+* **Scenario concatenato (ch2,3,4 → 90 slot):**
+  `python prepare_env0_nwpu.py --root "C:\Users\matte\PycharmProjects\Future_Data_Network\Data_set" --flight Flying_straight --channels 2,3,4 --merge concat --out "dataset_addestramento\scenario_env0_concat.json"`
+
+* **Scenario di validazione (ch5):**
+  `python prepare_env0_nwpu.py --root "C:\Users\matte\PycharmProjects\Future_Data_Network\Data_set" --flight Flying_straight --channel 5 --merge per_ch --out "dataset_addestramento\scenario_env0.json"`
+
+* **Scenario medio (media ch2-5):**
+  `python prepare_env0_nwpu.py --root "C:\Users\matte\PycharmProjects\Future_Data_Network\Data_set" --flight Flying_straight --channels 2,3,4,5 --merge average --out "dataset_addestramento\scenario_env0_avg.json"`
+
+Ogni esecuzione mostra slot, UAV, GS e link per slot.
+
+---
+
+**3. Training e inferenza (datacom_full.py)**
+Da `Future_Data_Network\`
+
+* **Training PPO+IL (LOCO, su sintetico o concat):**
+  `python datacom_full.py --train --episodes 50 --il_steps 100 --ckpt policy.pt`
+
+* **Inferenza su scenario reale (validazione ch5):**
+  `python datacom_full.py --infer "dataset_addestramento\scenario_env0_ch5.json" --ckpt policy.pt --out submission_ch5.json`
+
+* **Inferenza su altri scenari:**
+  `python datacom_full.py --infer "dataset_addestramento\scenario_env0_avg.json" --ckpt policy.pt --out submission_avg.json`
+  `python datacom_full.py --infer "dataset_addestramento\scenario_env0_concat.json" --ckpt policy.pt --out submission_concat.json`
+
+Output:
+`policy.pt` (modello addestrato)
+`submission_*.json` (mappature UAV→GS/NO_TX per slot)
+
+---
+
+**4. Valutazione prestazioni (eval mode)**
+`python datacom_full.py --eval dataset_addestramento\scenario_env0_ch5.json --ckpt policy.pt`
+→ stampa reward, throughput, latenza, distanza, handover e violazioni medi per slot.

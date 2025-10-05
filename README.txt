@@ -1,105 +1,138 @@
-### RIEPILOGO TECNICO — COSTRUZIONE DEL FILE scenario_env0.json
-Dataset di origine: “Data set for UWB Cooperative Navigation and Positioning of UAV Cluster”
-Autori: Chen, Zhang, Wang, Zhao, Northwest Polytechnical University (NWPU), Xi’an, Cina
-Pubblicato su ResearchGate, 2024 — DOI: 10.6084/m9.figshare.28121846
-Lingua: cinese/inglese tecnico — licenza accademica libera per ricerca non commerciale
+### README TECNICO — PIPELINE COMPLETA NWPU → DATACOM-FULL (LOCO TRAINING & INFERENZA)
 
-──────────────────────────────────────────────
-1. DESCRIZIONE DELL’ESPERIMENTO ORIGINALE
-──────────────────────────────────────────────
-Il gruppo NWPU ha realizzato un sistema sperimentale per la **navigazione cooperativa UWB (Ultra-Wideband)** di droni (UAV) in ambienti indoor e outdoor.
-Ogni esperimento coinvolge 7 UAV e 8 stazioni di ancoraggio fisse (GS) dotate di moduli UWB DWM1000, registrando dati sincroni di distanza e posizione per più traiettorie di volo:
+---
 
-- **Environment0** (outdoor LOS): Flying_straight, Flying_climb
-- **Environment1** (outdoor disperso / indoor): Flying_circle, Flying_disperse
+#### 1. Origine dei dati
 
-**Scala e configurazione fisica**
-I test “Environment0” sono stati eseguiti all’aperto nel campus NWPU di Xi’an su un’area rettangolare di circa **1,8 km × 1,8 km**, con altitudini UAV comprese tra **10 m e 60 m**.
-Le 8 GS sono fissate a terra lungo il perimetro del campo, mentre 7 UAV volano in formazione lineare o in lieve salita, mantenendo distanze reciproche dell’ordine di decine di metri.
-Le coordinate delle GS, tratte da `Anchors.mat`, variano tipicamente tra x,y ∈ [0, 1800 m], z ≈ [10–60 m].
-Le misure UWB forniscono un errore medio **< 0,2 m RMS** (validazione tecnica NWPU), quindi i dati sono reali e non simulati.
-Lo scenario Environment0 / Flying_straight / ch2 rappresenta circa 3 s di volo reale campionati a 10 Hz (Δt = 0,1 s), con 30 istantanee sincronizzate di posizione e distanza UAV–GS.
+Dataset: **“Data set for UWB Cooperative Navigation and Positioning of UAV Cluster”**
+Autori: Chen, Zhang, Wang, Zhao – *Northwest Polytechnical University (NWPU), Xi’an, Cina*
+Fonte: ResearchGate, DOI: 10.6084/m9.figshare.28121846 (2024)
+Linguaggio: Cinese/inglese tecnico — licenza accademica per uso non commerciale
 
-Per ogni UAV, il dataset fornisce:
-- Coordinate 3D reali nel tempo (`Position_label_ch#.mat`)
-- Distanze UAV → GS misurate (`Dis_anchor_label_ch#.mat`)
-- 30 campioni per canale (tipicamente `ch2`)
-- File `Anchors.mat` con posizioni assolute delle 8 GS
+L’esperimento misura la cooperazione di **7 UAV e 8 GS (Ground Station)** mediante moduli UWB DWM1000.
+Ogni “channel” (`ch#`) è una sessione reale di 3–6 s di volo campionata a **5–10 Hz** (30 frame).
+Le GS sono disposte in un’area rettangolare di ~1.8 × 1.8 km nel campus NWPU, con UAV tra 10 m e 60 m di quota.
 
-Il dataset è corredato da script MATLAB (`Main_straight.m`, `Save_Distance_AL.m`) e figure (`Technical_validation/Position_error/…`) per la verifica grafica e numerica.
+Struttura originale:
 
-──────────────────────────────────────────────
-2. SCOPO DELLA RIELABORAZIONE PYTHON
-──────────────────────────────────────────────
-Lo script `prepare_env0_nwpu.py` converte i dati MATLAB di **Environment0 / Flying_straight / ch2** in un file JSON compatibile con il framework di simulazione **DataCom-Full (Huawei Tech Arena)**, mirato a:
-- addestramento di modelli RL (PPO, GNN, IL)
-- simulazioni di allocazione risorse UAV–GS
-- visualizzazioni o replay numerici autonomi
+* `Anchors.mat` → coordinate fisse GS (8 × 3)
+* `Position_label_ch#.mat` → posizioni UAV nel tempo (7 × 3 × 30)
+* `Dis_anchor_label_ch#.mat` → distanze UAV–GS (8 × 7 × 30)
+* Script MATLAB (`Main_straight.m`, `Save_Distance_AL.m`) per validazione numerica
 
-──────────────────────────────────────────────
-3. MAPPATURA DATI — DALLE MATRICI MATLAB ALLO SCENARIO JSON
-──────────────────────────────────────────────
-Dati fisici (reali):
-- **Anchors.mat** → coordinate GS (8×3)
-- **Position_label_ch2.mat** → posizioni UAV (7×3×30)
-- **Dis_anchor_label_ch2.mat** → distanze UAV–GS (8×7×30)
+Errori medi UWB < 0.2 m RMS: dati reali e non simulati.
 
-**Campionamento temporale e discretizzazione**
-Il dataset NWPU è già discreto: ogni file contiene 30 campioni uniformemente distribuiti.
-Ogni indice `t ∈ [0, 29]` rappresenta un’istantanea sincronizzata del sistema UAV–GS.
-La frequenza (≈ 5–10 Hz) implica 3–6 s di volo totale.
-Lo script conserva tale granularità, creando 30 slot discreti (`slot_t`) senza interpolazioni.
-Il campo `f3` (velocità) ripristina la continuità dinamica tra i punti discreti.
+---
+
+#### 2. Obiettivo del progetto
+
+Costruire un **ambiente realistico per addestramento e validazione** di modelli RL/GNN per allocazione dinamica UAV–GS (Huawei Tech Arena 2025).
+La pipeline trasforma i `.mat` NWPU in uno **scenario JSON strutturato per DataCom-Full**, mantenendo le distanze reali e aggiungendo feature sintetiche coerenti (capacità, backlog, bitrate, deadline).
+
+---
+
+#### 3. Fase di preparazione dati
+
+Script principale: `prepare_env0_nwpu.py`
+Funzioni:
+
+* conversione `.mat` → `.json` multipli o aggregati (per più canali)
+* modalità `per_ch`, `concat`, `average`
+* generazione metadati e seed riproducibile
+
+Dati mantenuti:
+
+* posizioni 3D reali UAV
+* distanze reali UAV–GS
 
 Dati derivati:
-- **Velocità (f3)** = ‖P[t] − P[t−1]‖
-- **Distanze (w1)** = valori sperimentali (m)
 
-Dati sintetici (riproducibili, seed = 7):
-- **Backlog (f1)** e **Deadline (f2)** → distribuzioni gaussiane/troncate
-- **GS features (c1,c2,c3)** :
-   c1 = capacità residua ~ N(120,30)
-   c2 = latenza base ~ N(20,8)
-   c3 = queue ~ N(20,10)
-- **Bitrate (w2)** ≈ `max(1, 320 − 0.25 · w1 + N(0, 3))`
+* velocità UAV (`f3 = ‖ΔP‖`)
+* bitrate empirico (`w2 ≈ 320 − 0.25 × w1 + N(0, 3)`)
 
-──────────────────────────────────────────────
-4. STRUTTURA DEL FILE JSON
-──────────────────────────────────────────────
-{
-  "meta": {
-    "name": "nwpu_env0",
-    "flight": "Flying_straight",
-    "channel": "ch2",
-    "source": "NWPU UWB dataset (Environment0)",
-    "units": {"pos":"m","w1":"m","w2":"arb_bitrate"},
-    "note": "Posizioni e distanze reali; feature e bitrate sintetici ma coerenti"
-  },
-  "slots": [
-    {
-      "t": 0..29,
-      "uav": [{id:"u0",f1,f2,f3}, …, {id:"u6"}],
-      "gs":  [{id:"g0",c1,c2,c3}, …, {id:"g7"}],
-      "links": [{uav_id:"u0",gs_id:"g0",w1,w2}, …]
-    }
-  ]
-}
+Feature sintetiche:
 
-──────────────────────────────────────────────
-5. DIFFERENZE CHIAVE RISPETTO AI DATI ORIGINALI
-──────────────────────────────────────────────
-- Nessuna perdita di informazione metrica: distanze e posizioni = valori UWB originali.
-- Introduzione di una rappresentazione slot-based discreta per modellazione temporale.
-- Aggiunta di feature di contesto (f1,f2,c1–c3) necessarie alla modellazione di rete.
-- Inserimento di un modello empirico di canale (bit-rate w2) dipendente dalla distanza.
-- Conversione in formato JSON autonomo, indipendente da MATLAB /HDF5.
+* `f1` backlog ∼ N(150, 60), `f2` deadline ∼ U(1–6)
+* `c1` capacità residua ∼ N(120, 30)
+* `c2` latenza base ∼ N(20, 8)
+* `c3` livello di coda ∼ N(20, 10)
 
-──────────────────────────────────────────────
-6. RISULTATO FINALE
-──────────────────────────────────────────────
-File generato:
-C:\Users\matte\PycharmProjects\Future_Data_Network\dataset_addestramento\scenario_env0.json
-Contiene 30 slot temporali × 7 UAV × 8 GS = 1680 link complessivi.
+Output:
 
-In sintesi:
-Il JSON conserva la geometria e le misure UWB reali del team NWPU, arricchendole con variabili sintetiche e una discretizzazione temporale uniforme che consente di modellare il comportamento dinamico della rete in un contesto di apprendimento per rinforzo coerente.
+* JSON slot-based, 30 slot × 7 UAV × 8 GS (≈ 1680 link)
+* compatibile con il motore RL DataCom-Full
+
+---
+
+#### 4. Modello e training
+
+Script principale: `datacom_full.py`
+Architettura: **GNN EdgeNet + PPO (con Imitation Learning e Safety Layer)**
+
+Pipeline:
+
+1. **IL (warm-start)** imita una baseline greedy *capacity-aware* (allocazione euristica per rapporto bitrate/distanza).
+2. **PPO** ottimizza la policy tramite reward combinato:
+   R = α·throughput − β·latency − γ·distance − δ·handover − penalty·violations.
+3. **Safety Layer** proietta le scelte entro la capacità GS (`cap_scale = 30`).
+4. **LOCO** (*Leave-One-Channel-Out*):
+   addestramento su canali 2–4 (scenario concatenato), validazione su ch5.
+
+Output:
+
+* `policy.pt` → pesi della rete addestrata
+* `submission_*.json` → mappatura UAV→GS/NO_TX per slot
+
+---
+
+#### 5. Modalità di inferenza e valutazione
+
+Inferenza: `--infer scenario_env0_ch5.json --ckpt policy.pt --out submission_ch5.json`
+Genera un file che descrive, per ogni slot, la scelta della GS migliore o assenza di trasmissione.
+
+Valutazione (`--eval`):
+calcola e stampa per-slot e medi su 30 frame:
+
+* **R** → reward complessivo
+* **thr** → throughput servito (MB/s simulati)
+* **lat** → latenza media (ms simulati)
+* **dist** → distanza UAV–GS media
+* **ho** → handover (cambi GS)
+* **viol** → violazioni capacità
+
+Esempio medio (cap_scale = 30):
+reward ≈ 24 / slot, throughput ≈ 28, latenza ≈ 157 ms, distanza ≈ 87 m, handover ≈ 1.5, nessuna violazione.
+
+---
+
+#### 6. Risultato finale
+
+* Addestramento stabile (loss IL ≈ 4.8, reward PPO > 100)
+* Policy valida, con preferenza di GS coerenti con geometria (g5–g7)
+* Nessuna violazione di capacità e handover contenuti → comportamento realistico
+
+---
+
+#### 7. Struttura dei file principali
+
+```
+Future_Data_Network/
+│
+├── dataset_addestramento/
+│   ├── prepare_env0_nwpu.py      → conversione .mat → .json
+│   ├── scan_dataset.py           → analisi struttura dataset originale
+│   ├── scenario_env0_*.json      → scenari multi-channel reali
+│   └── submission_*.json         → risultati inferenza
+│
+├── datacom_full.py               → training/inferenza PPO+GNN
+├── policy.pt                     → modello addestrato
+└── README.md                     → documento tecnico (questo)
+```
+
+---
+
+#### 8. Sintesi finale
+
+L’intera pipeline riproduce fedelmente il comportamento fisico del dataset NWPU, trasformandolo in un ambiente di simulazione RL completo e riproducibile.
+La strategia **LOCO** (addestramento su subset di canali, validazione su uno escluso) garantisce robustezza e generalizzazione.
+Il sistema risultante consente esperimenti su politiche di allocazione UAV–GS, studio degli effetti di capacità, latenza, distanza e handover in uno scenario realistico e misurato sul campo.

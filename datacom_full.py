@@ -188,15 +188,29 @@ def validate_slot(slot: Slot) -> Optional[str]:
 # =====================================
 
 class DataComEnv:
-    def __init__(self, alpha=1.2, beta=0.015, gamma=0.02, delta=0.0, penalty=30.0,
+    def __init__(self, config_path: Optional[str] = None,
+                 alpha=1.2, beta=0.015, gamma=0.02, delta=0.0, penalty=30.0,
                  relay_latency_extra=5.0):
+
+        # --- Caricamento da file config (se fornito) ---
+        if config_path is not None:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            alpha = cfg.get("alpha", alpha)
+            beta = cfg.get("beta", beta)
+            gamma = cfg.get("gamma", gamma)
+            delta = cfg.get("delta", delta)
+            penalty = cfg.get("penalty", penalty)
+            relay_latency_extra = cfg.get("relay_latency_extra", relay_latency_extra)
+
+        # --- Parametri ambiente ---
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
         self.delta = delta
         self.penalty = penalty
+        self.relay_latency_extra = relay_latency_extra
         self.prev_choice: Dict[str, str] = {}
-        self.relay_latency_extra = relay_latency_extra  # costo extra se 2 hop
 
     # aggiunto: aug_info e relay_plan per distinguere diretto/relay
     def step(self, slot: Slot, mapping: Dict[str, str],
@@ -800,6 +814,21 @@ def ppo_train_with_loco(env: DataComEnv,
                 nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
                 opt.step()
 
+        # === calcolo metriche aggregate ===
+        info_tot = {"throughput":0,"latency":0,"distance":0,"handover":0,"violations":0}
+        for (slot, aug, overrides, mapping, relay_plan, old_logp, _r) in traj:
+            _, info = env.step(slot, mapping, aug_info=aug if aug else None,
+                               relay_plan=relay_plan, cap_scale=30.0)
+            for k in info_tot.keys():
+                info_tot[k] += float(info[k])
+        n = max(1, len(traj))
+        for k in info_tot.keys():
+            info_tot[k] /= n
+
+        print(f"[Metrics][ep={ep+1:02d}] thr={info_tot['throughput']:.2f} "
+              f"lat={info_tot['latency']:.2f} dist={info_tot['distance']:.2f} "
+              f"ho={info_tot['handover']:.2f} viol={info_tot['violations']:.2f}")
+
         avg_train = total_rew / max(1, total_cnt)
         print(f"[PPO-real][train] ep {ep+1}/{episodes} avg_reward={avg_train:.3f}")
 
@@ -936,83 +965,6 @@ def run_inference(policy: PPOPolicy, scenario: Scenario, device: torch.device,
 # = CAPITOLO 9: Entry-point /  CLI   =
 # ====================================
 
-def main():
-    ap = argparse.ArgumentParser(description="Future Network – DataCom (esteso: LOCO, reali, hybrid, U2U relay)")
-    ap.add_argument("--train", action="store_true", help="train (sintetico fallback o reali se specificati)")
-    ap.add_argument("--eval", type=Path, help="valuta il modello su uno Scenario JSON (stampa metriche)")
-    ap.add_argument("--per_slot", action="store_true", help="stampa le metriche per ogni slot durante --eval")
-    ap.add_argument("--train_scenarios", type=str, nargs="*", default=None,
-                    help="file JSON reali usati per training")
-    ap.add_argument("--val_scenarios", type=str, nargs="*", default=None,
-                    help="file JSON reali usati per validazione (LOCO)")
-    ap.add_argument("--use_loco", action="store_true", help="(flag informativo) validazione LOCO quando val_scenarios è fornito")
-    ap.add_argument("--episodes", type=int, default=100, help="episodi PPO")
-    ap.add_argument("--il_steps", type=int, default=150, help="passi di imitation learning")
-    ap.add_argument("--ckpt", type=Path, default=Path("policy.pt"), help="checkpoint .pt")
-    ap.add_argument("--infer", type=Path, help="inferenzia su input Scenario JSON")
-    ap.add_argument("--out", type=Path, help="salva submission JSON")
-    # hyper per relay
-    ap.add_argument("--relay_factor", type=float, default=0.8, help="fattore di efficienza per il relay u2u (λ)")
-    ap.add_argument("--cap_scale", type=float, default=30.0, help="scala normalizzazione capacità GS")
-    ap.add_argument("--relay_scale", type=float, default=30.0, help="scala normalizzazione budget relay UAV")
-    args = ap.parse_args()
-
-    device = get_device()
-    print(f"[Device] Using {device}")
-
-    if args.train:
-        env = DataComEnv()
-        if args.train_scenarios:
-            # TRAIN su REALI + VAL LOCO (se fornita)
-            train_scn = load_many(args.train_scenarios)
-            val_scn   = load_many(args.val_scenarios) if args.val_scenarios else []
-            policy = ppo_train_with_loco(env,
-                                         train_scn=train_scn,
-                                         val_scn=val_scn,
-                                         episodes=args.episodes,
-                                         il_steps=args.il_steps,
-                                         relay_factor=args.relay_factor,
-                                         cap_scale=args.cap_scale,
-                                         relay_scale=args.relay_scale,
-                                         device=device)
-        else:
-            # Fallback: training sintetico
-            policy = ppo_train(env,
-                               episodes=args.episodes,
-                               il_steps=args.il_steps,
-                               relay_factor=args.relay_factor,
-                               cap_scale=args.cap_scale,
-                               relay_scale=args.relay_scale,
-                               device=device)
-        torch.save(policy.state_dict(), args.ckpt)
-        print(f"Checkpoint salvato -> {args.ckpt}")
-
-    if args.infer:
-        scn = load_scenario(args.infer)
-        policy = PPOPolicy().to(device)
-        if args.ckpt.exists():
-            policy.load_state_dict(torch.load(args.ckpt, map_location=device))
-        else:
-            print("ATTENZIONE: nessun checkpoint trovato, policy random.")
-        assignments = run_inference(policy, scn, device,
-                                    relay_factor=args.relay_factor,
-                                    cap_scale=args.cap_scale,
-                                    relay_scale=args.relay_scale)
-        out = args.out or Path("submission.json")
-        save_submission({"solver": "gnn_ppo_ctde_loco_u2u"}, assignments, out)
-        print(f"Submission scritta -> {out}")
-    if args.eval:
-        scn = load_scenario(args.eval)
-        policy = PPOPolicy().to(device)
-        if args.ckpt.exists():
-            policy.load_state_dict(torch.load(args.ckpt, map_location=device))
-        else:
-            print("ATTENZIONE: nessun checkpoint trovato, policy random.")
-        _ = evaluate_scenario(policy, scn, device=device, per_slot=args.per_slot,
-                              relay_factor=args.relay_factor,
-                              cap_scale=args.cap_scale,
-                              relay_scale=args.relay_scale)
-
 def evaluate_scenario(policy: PPOPolicy, scenario: Scenario, device: torch.device,
                       per_slot: bool = False, relay_factor: float = 0.8,
                       cap_scale: float = 30.0, relay_scale: float = 30.0
@@ -1078,5 +1030,134 @@ def evaluate_scenario(policy: PPOPolicy, scenario: Scenario, device: torch.devic
 
     return agg
 
+# ====================================
+# = CAPITOLO 9: Entry-point /  CLI   =
+# ====================================
+
+def main():
+    ap = argparse.ArgumentParser(description="Future Network – DataCom (LOCO, reali, hybrid, U2U relay)")
+    ap.add_argument("--train", action="store_true", help="Esegui training (sintetico o reale)")
+    ap.add_argument("--infer", type=Path, nargs="?", const=True, help="Esegui inferenza su scenario JSON (override)")
+    ap.add_argument("--eval", type=Path, help="Valuta il modello su uno scenario JSON")
+    ap.add_argument("--per_slot", action="store_true", help="Mostra metriche per ogni slot in --eval")
+    ap.add_argument("--episodes", type=int, default=None, help="Numero episodi PPO (override)")
+    ap.add_argument("--il_steps", type=int, default=None, help="Passi di imitation learning (override)")
+    args = ap.parse_args()
+
+    device = get_device()
+    print(f"[Device] Using {device}")
+
+    # === Carica configurazione globale ===
+    cfg_path = Path("config_env.json")
+    cfg = {}
+    if cfg_path.exists():
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        print(f"[Config] Caricato {cfg_path}")
+    else:
+        print("[Config] ⚠ Nessun file config_env.json trovato.")
+
+    # === Determina modalità ===
+    mode = cfg.get("mode", "").lower()
+    if args.train:
+        mode = "train"
+    elif args.infer is not None:
+        mode = "infer"
+    elif args.eval:
+        mode = "eval"
+
+    if not mode:
+        print("⚠️ Nessuna modalità specificata. Usa --train / --infer / --eval oppure aggiungi 'mode' in config_env.json.")
+        return
+
+    # === TRAIN MODE ===
+    if mode == "train":
+        print("[Mode] TRAINING")
+        env = DataComEnv(**cfg.get("environment", {}))
+        train_scn = load_many([cfg.get("dataset", {}).get("path_train", "dataset_addestramento/dataset.json")])
+        val_scn = []
+
+        episodes = args.episodes or cfg.get("training", {}).get("episodes", 10)
+        il_steps = args.il_steps or cfg.get("training", {}).get("il_steps", 150)
+
+        policy = ppo_train_with_loco(
+            env,
+            train_scn=train_scn,
+            val_scn=val_scn,
+            episodes=episodes,
+            il_steps=il_steps,
+            relay_factor=cfg.get("training", {}).get("relay_factor", 0.8),
+            cap_scale=cfg.get("training", {}).get("cap_scale", 30.0),
+            relay_scale=cfg.get("training", {}).get("relay_scale", 30.0),
+            device=device
+        )
+
+        ckpt_path = Path(cfg.get("paths", {}).get("checkpoint_file", "Checkpoint/policy.pt"))
+        torch.save(policy.state_dict(), ckpt_path)
+        print(f"[OK] Checkpoint salvato -> {ckpt_path}")
+
+    # === INFERENCE MODE ===
+    elif mode == "infer":
+        print("[Mode] INFERENCE")
+
+        # === Percorsi da config_env.json ===
+        paths_cfg = cfg.get("paths", {})
+        default_infer_input = paths_cfg.get("inference_input", "dataset_addestramento/dataset.json")
+        default_ckpt_file = paths_cfg.get("checkpoint_file", "Checkpoint/policy_swarm3d.pt")
+        default_out_file = paths_cfg.get("inference_output", "submission.json")
+
+        # Se l’utente non passa un argomento dopo --infer, uso quello da config
+        if isinstance(args.infer, bool) or args.infer is None:
+            scn_path = Path(default_infer_input)
+        else:
+            scn_path = Path(args.infer)
+
+        ckpt_path = Path(default_ckpt_file)
+        out_path = Path(default_out_file)
+
+        scn = load_scenario(Path(scn_path))
+        policy = PPOPolicy().to(device)
+
+        if ckpt_path.exists():
+            policy.load_state_dict(torch.load(ckpt_path, map_location=device))
+            print(f"[Infer] Checkpoint caricato da {ckpt_path}")
+        else:
+            print("[Infer] ⚠ Nessun checkpoint trovato, uso policy casuale.")
+
+        assignments = run_inference(
+            policy, scn, device,
+            relay_factor=cfg.get("training", {}).get("relay_factor", 0.8),
+            cap_scale=cfg.get("training", {}).get("cap_scale", 30.0),
+            relay_scale=cfg.get("training", {}).get("relay_scale", 30.0)
+        )
+
+        save_submission({"solver": "gnn_ppo_ctde_loco_u2u"}, assignments, out_path)
+        print(f"[OK] Submission salvata -> {out_path}")
+
+    # === EVAL MODE ===
+    elif mode == "eval":
+        print("[Mode] EVALUATION")
+
+        scn_path = args.eval or Path(cfg.get("paths", {}).get("inference_input", "dataset_addestramento/dataset.json"))
+        ckpt_path = Path(cfg.get("paths", {}).get("checkpoint_file", "Checkpoint/policy.pt"))
+
+        policy = PPOPolicy().to(device)
+        if ckpt_path.exists():
+            policy.load_state_dict(torch.load(ckpt_path, map_location=device))
+        else:
+            print("⚠ Nessun checkpoint trovato, uso policy casuale.")
+
+        scn = load_scenario(Path(scn_path))
+        _ = evaluate_scenario(
+            policy, scn, device=device,
+            per_slot=args.per_slot,
+            relay_factor=cfg.get("training", {}).get("relay_factor", 0.8),
+            cap_scale=cfg.get("training", {}).get("cap_scale", 30.0),
+            relay_scale=cfg.get("training", {}).get("relay_scale", 30.0)
+        )
+
+    else:
+        print(f"⚠️ Modalità sconosciuta: {mode}")
+
 if __name__ == "__main__":
     main()
+

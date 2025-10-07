@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-viz_infer.py - Animazione 3D del flusso dati in scenario NWPU.
-Mostra i link attivi e l'illuminazione dei collegamenti scelti.
+viz_infer.py — Visualizzazione 3D del flusso UAV–GS (Swarm 3D)
+Legge automaticamente percorsi e parametri da config_env.json.
+Compatibile con datacom_full.py e dataset_addestramento/dataset.json.
 """
 
-import argparse, torch, numpy as np
+import json, torch, numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datacom_full import (
@@ -13,14 +14,21 @@ from datacom_full import (
     safety_project_aug, get_device
 )
 
-# === Parametri principali ===
-CKPT_DIR = Path(r"C:\Users\matte\PycharmProjects\Future_Data_Network\Checkpoint")
-SCN_PATH = Path(r"C:\Users\matte\PycharmProjects\Future_Data_Network\dataset_addestramento\scenario_env0_ch5.json")
-RELAY_FACTOR = 0.9
-CAP_SCALE = 30.0
-RELAY_SCALE = 30.0
+# === Carica configurazione globale ===
+CONFIG_PATH = Path("config_env.json")
+if not CONFIG_PATH.exists():
+    raise FileNotFoundError(f"File di configurazione mancante: {CONFIG_PATH}")
 
+config = json.loads(CONFIG_PATH.read_text())
 
+SCN_PATH = Path(config["paths"]["inference_input"])
+CKPT_PATH = Path(config["paths"]["checkpoint_file"])
+
+RELAY_FACTOR = config["training"].get("relay_factor", 0.8)
+CAP_SCALE = config["training"].get("cap_scale", 30.0)
+RELAY_SCALE = config["training"].get("relay_scale", 30.0)
+
+# === Funzioni principali ===
 def run_inference(policy, scn):
     """Esegue la policy su tutti gli slot dello scenario e restituisce mapping e relay"""
     policy.eval()
@@ -35,14 +43,14 @@ def run_inference(policy, scn):
     return assignments
 
 
-def draw_slot(ax, slot, mapping, epoch_idx, total_epochs):
+def draw_slot(ax, slot, mapping, idx, total):
     """Disegna la scena per un singolo slot"""
     ax.clear()
     ax.set_xlabel("X [m]"); ax.set_ylabel("Y [m]"); ax.set_zlabel("Z [m]")
-    ax.set_xlim(0, 20); ax.set_ylim(0, 18); ax.set_zlim(0, 8)
-    ax.set_title(f"Epoca {epoch_idx}/{total_epochs} — Slot {slot.t}")
+    ax.set_xlim(0, 100); ax.set_ylim(0, 100); ax.set_zlim(0, 10)
+    ax.set_title(f"Slot {slot.t}/{total}")
 
-    # GS
+    # Ground Stations
     gs_coords = np.array([[g.x, g.y, g.z] for g in slot.gs])
     ax.scatter(gs_coords[:, 0], gs_coords[:, 1], gs_coords[:, 2],
                c='green', s=80, depthshade=True, label="GS")
@@ -67,34 +75,27 @@ def draw_slot(ax, slot, mapping, epoch_idx, total_epochs):
     ax.legend(loc='upper right')
 
 
-def replay_training():
-    """Riproduce i checkpoint in sequenza"""
+def visualize():
+    """Esegue inferenza e visualizza il comportamento del modello addestrato"""
+    print(f"[Config] Dataset base: {SCN_PATH}")
+    print(f"[Config] Checkpoint:   {CKPT_PATH}")
+
     device = get_device()
     scn = load_scenario(SCN_PATH)
+    policy = PPOPolicy().to(device)
+    policy.load_state_dict(torch.load(CKPT_PATH, map_location=device))
 
-    ckpts = sorted(list(CKPT_DIR.glob("policy_epoch_*.pt")))
-    if not ckpts:
-        print(f"Nessun checkpoint trovato in {CKPT_DIR}")
-        return
+    assignments = run_inference(policy, scn)
 
     fig = plt.figure(figsize=(7, 6))
     ax = fig.add_subplot(111, projection='3d')
 
-    for i, ckpt in enumerate(ckpts, 1):
-        print(f"[Replay] Epoca {i}/{len(ckpts)} – {ckpt.name}")
-        policy = PPOPolicy().to(device)
-        policy.load_state_dict(torch.load(ckpt, map_location=device))
-
-        assignments = run_inference(policy, scn)
-
-        for slot, (mapping, _) in zip(scn.slots, assignments):
-            draw_slot(ax, slot, mapping, i, len(ckpts))
-            plt.pause(0.05)  # velocità animazione
-
-        plt.pause(0.5)  # pausa tra epoche
+    for slot, (mapping, _) in zip(scn.slots, assignments):
+        draw_slot(ax, slot, mapping, slot.t, len(scn.slots))
+        plt.pause(0.05)
 
     plt.show()
 
 
 if __name__ == "__main__":
-    replay_training()
+    visualize()

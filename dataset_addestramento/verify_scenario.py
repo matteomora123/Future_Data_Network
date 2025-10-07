@@ -1,68 +1,65 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Verifica completa di coerenza per scenario_env0_*.json
-- Controlla range coordinate
-- Confronta distanze UAV–GS con w1
-- Verifica numero e range dei link U2U
-- Mostra grafico 2D iniziale
+verify_scenario.py — Controlla consistenza di scenario JSON (posizioni, range, U2U, distanze).
+Legge il percorso del dataset direttamente da config_env.json.
 """
 
 import json
 import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
 
-SCN_PATH = Path("scenario_env0_concat.json")  # o scenario_env0_ch5.json
 
-# --- Carica file JSON ---
-d = json.load(open(SCN_PATH, "r"))
-slots = d["slots"]
-print(f"\nScenario: {d['meta']['name']} | slot totali: {len(slots)}")
+def verify(path: Path):
+    scn = json.loads(path.read_text(encoding="utf-8"))
+    slots = scn["slots"]
+    T = len(slots)
+    print(f"\nScenario: {scn['meta'].get('name','?')} | slot totali: {T}")
 
-# --- 1. Verifica range posizioni ---
-u0 = slots[0]["uav"]
-g0 = slots[0]["gs"]
+    # --- range coordinate ---
+    all_u = np.array([[u["x"], u["y"], u["z"]] for s in slots for u in s["uav"]])
+    all_g = np.array([[g["x"], g["y"], g["z"]] for g in slots[0]["gs"]])
+    print("\n[1] RANGE COORDINATE (m)")
+    print(f"UAV: x∈[{all_u[:,0].min():.2f},{all_u[:,0].max():.2f}], "
+          f"y∈[{all_u[:,1].min():.2f},{all_u[:,1].max():.2f}], "
+          f"z∈[{all_u[:,2].min():.2f},{all_u[:,2].max():.2f}]")
+    print(f"GS : x∈[{all_g[:,0].min():.2f},{all_g[:,0].max():.2f}], "
+          f"y∈[{all_g[:,1].min():.2f},{all_g[:,1].max():.2f}], "
+          f"z∈[{all_g[:,2].min():.2f},{all_g[:,2].max():.2f}]")
 
-u_coords = np.array([[u["x"], u["y"], u["z"]] for u in u0])
-g_coords = np.array([[g["x"], g["y"], g["z"]] for g in g0])
+    # --- distanze medie U2G slot 0 ---
+    s0 = slots[0]
+    D = []
+    for lk in s0["links"]:
+        u = next(u for u in s0["uav"] if u["id"] == lk["uav_id"])
+        g = next(g for g in s0["gs"] if g["id"] == lk["gs_id"])
+        d_real = np.linalg.norm([u["x"] - g["x"], u["y"] - g["y"], u["z"] - g["z"]])
+        D.append(abs(d_real - lk["w1"]))
+    print("\n[2] VERIFICA DISTANZE U2G (slot 0)")
+    print(f"Errore medio distanza (m): {np.mean(D):.3f}")
 
-print("\n[1] RANGE COORDINATE (m)")
-print(f"UAV: x∈[{u_coords[:,0].min():.2f}, {u_coords[:,0].max():.2f}], "
-      f"y∈[{u_coords[:,1].min():.2f}, {u_coords[:,1].max():.2f}], "
-      f"z∈[{u_coords[:,2].min():.2f}, {u_coords[:,2].max():.2f}]")
-print(f"GS : x∈[{g_coords[:,0].min():.2f}, {g_coords[:,0].max():.2f}], "
-      f"y∈[{g_coords[:,1].min():.2f}, {g_coords[:,1].max():.2f}], "
-      f"z∈[{g_coords[:,2].min():.2f}, {g_coords[:,2].max():.2f}]")
+    # --- U2U links ---
+    u2u = s0.get("u2u", [])
+    if u2u:
+        d = np.array([e["d"] for e in u2u])
+        r = np.array([e["r"] for e in u2u])
+        print(f"\n[3] LINK U2U: {len(u2u)} collegamenti, "
+              f"distanza media {d.mean():.2f} m, max {d.max():.2f} m")
+        print(f"   Rate medio: {r.mean():.1f}, min: {r.min():.1f}")
+    else:
+        print("\n[3] Nessun link U2U nel dataset.")
 
-# --- 2. Verifica distanze U2G (slot 0) ---
-print("\n[2] VERIFICA DISTANZE U2G (slot 0)")
-links = slots[0]["links"]
-diffs = []
-for lk in links:
-    u = next(u for u in u0 if u["id"] == lk["uav_id"])
-    g = next(g for g in g0 if g["id"] == lk["gs_id"])
-    d_calc = np.linalg.norm(np.array([u["x"], u["y"], u["z"]]) - np.array([g["x"], g["y"], g["z"]]))
-    diffs.append(abs(d_calc - lk["w1"]))
-print(f"Errore medio distanza (m): {np.mean(diffs):.3f}")
 
-# --- 3. Verifica link U2U ---
-if "u2u" in slots[0]:
-    u2u = slots[0]["u2u"]
-    dists = [lk["d"] for lk in u2u]
-    print(f"\n[3] LINK U2U: {len(u2u)} collegamenti, distanza media {np.mean(dists):.2f} m, max {np.max(dists):.2f} m")
-    print(f"   Rate medio: {np.mean([lk['r'] for lk in u2u]):.1f}, min: {np.min([lk['r'] for lk in u2u]):.1f}")
-else:
-    print("\n[3] Nessun link U2U trovato in slot[0].")
+if __name__ == "__main__":
+    CONFIG_PATH = Path(__file__).resolve().parents[1] / "config_env.json"
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError("File config_env.json non trovato nella directory principale.")
 
-# --- 4. Visualizzazione 2D ---
-plt.figure(figsize=(6, 5))
-plt.scatter(g_coords[:, 0], g_coords[:, 1], c='green', s=80, label='GS (anchors)')
-plt.scatter(u_coords[:, 0], u_coords[:, 1], c='dodgerblue', s=50, label='UAV')
-plt.xlabel("X [m]")
-plt.ylabel("Y [m]")
-plt.title("Distribuzione spaziale iniziale (slot 0)")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
+    cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    dataset_path = cfg.get("dataset", {}).get("path_train", "dataset_addestramento/dataset.json")
+    SCN_PATH = Path(dataset_path)
+
+    if not SCN_PATH.exists():
+        raise FileNotFoundError(f"Dataset non trovato: {SCN_PATH.resolve()}")
+
+    verify(SCN_PATH)

@@ -1,59 +1,26 @@
-cd "C:\Users\matte\PycharmProjects\Future_Data_Network\dataset_addestramento"
+preparazione dataset
+python dataset_addestramento\prepare_swarm.py
 
-dataset concatenato (ch2–ch4)
-python .\prepare_env0_nwpu.py `
-  --root "C:\Users\matte\PycharmProjects\Future_Data_Network\Data_set" `
-  --flight Flying_straight `
-  --channels 2,3,4 `
-  --merge concat `
-  --u2u `
-  --u2u_k 0.5 `
-  --u2u_range 20 `
-  --u2u_max 160 `
-  --u2u_noise 0.02 `
-  --u2u_undirected `
-  --out "scenario_env0_concat.json"
-
-verifica generazione link u2u
-python -c "import json; d=json.load(open('scenario_env0_concat.json')); print(len(d['slots'][0]['u2u']), 'u2u links nel primo slot')"
-
-
-dataset ch5
-python .\prepare_env0_nwpu.py `
-  --root "C:\Users\matte\PycharmProjects\Future_Data_Network\Data_set" `
-  --flight Flying_straight `
-  --channel 5 `
-  --merge per_ch `
-  --u2u `
-  --u2u_k 0.5 `
-  --u2u_range 20 `
-  --u2u_max 160 `
-  --u2u_noise 0.02 `
-  --u2u_undirected `
-  --out "scenario_env0_ch5.json"
-
-verifica generazione link
-python -c "import json; d=json.load(open('scenario_env0_ch5.json')); print(len(d['slots'][0]['u2u']), 'u2u links nel primo slot')"
-
+verifica dataset
+python dataset_addestramento\verify_scenario.py
 
 addestramento
-python .\datacom_full.py --train `
-  --train_scenarios ".\dataset_addestramento\scenario_env0_concat.json" `
-  --val_scenarios   ".\dataset_addestramento\scenario_env0_ch5.json" `
-  --use_loco `
-  --episodes 60 `
-  --il_steps 150 `
-  --relay_factor 0.9 `
-  --cap_scale 30 `
-  --relay_scale 30 `
-  --ckpt policy.pt
+python datacom_full.py --train
 
-Inferenza su CH5
-python .\datacom_full.py --infer ".\dataset_addestramento\scenario_env0_ch5.json" `
-  --ckpt policy.pt `
-  --out ".\submission.json"
+inferenza
+python datacom_full.py --infer
 
-Valutazione slot-by-slot
-python .\datacom_full.py --eval ".\dataset_addestramento\scenario_env0_ch5.json" `
-  --ckpt policy.pt `
-  --per_slot
+visualizzazione
+python viz_infer.py
+
+throughput → aumenta la reward
+latency, distance, violations → la diminuiscono (sono costi)
+e violations pesa tantissimo (-30 * violazioni per UAV).
+| Fase        | Reward media          | Significato                             |
+| ----------- | --------------------- | --------------------------------------- |
+| Epoche 1–10 | ≈ −3                  | Policy casuale, inizializzazione PPO    |
+| 10–30       | ↑ verso 0 o positivo  | Impara a minimizzare le violazioni      |
+| 30–60       | → cresce sopra 50–100 | Inizia a ottimizzare throughput/latenza |
+| >100        | stabilizza su 90–120  | Policy stabile e performante            |
+
+

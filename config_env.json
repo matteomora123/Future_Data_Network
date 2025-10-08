@@ -19,6 +19,11 @@
     "cap_scale": 30.0,
     "relay_scale": 30.0
   },
+  "relay_policy": {
+    "via_rate_threshold": 0.5,
+    "cost_ratio_accept": 1.3,
+    "bonus_reward": 5.0
+  },
   "paths": {
     "checkpoint_dir": "Checkpoint/",
     "checkpoint_file": "Checkpoint/policy_swarm3d.pt",

@@ -43,7 +43,7 @@ def run_inference(policy, scn):
     return assignments
 
 
-def draw_slot(ax, slot, mapping, idx, total):
+def draw_slot(ax, slot, mapping, relay_plan, idx, total):
     """Disegna la scena per un singolo slot"""
     ax.clear()
     ax.set_xlabel("X [m]"); ax.set_ylabel("Y [m]"); ax.set_zlabel("Z [m]")
@@ -60,17 +60,40 @@ def draw_slot(ax, slot, mapping, idx, total):
     ax.scatter(u_coords[:, 0], u_coords[:, 1], u_coords[:, 2],
                c='dodgerblue', s=50, depthshade=True, label="UAV")
 
-    # Link attivi
+    # Link attivi (con relay evidenziati)
     for u in slot.uav:
         dest = mapping.get(u.id, "NO_TX")
-        if dest.startswith("g"):
+        relay_info = relay_plan.get(u.id, {"relay": "", "use_relay": False})
+        relay_id = relay_info["relay"]
+        use_relay = relay_info["use_relay"]
+
+        if use_relay and relay_id:
+            # UAV → Relay (arancione)
+            try:
+                v = next(v for v in slot.uav if v.id == relay_id)
+                ax.plot([u.x, v.x], [u.y, v.y], [u.z, v.z],
+                        color='orange', linewidth=2.5, alpha=0.9, label=None)
+            except StopIteration:
+                continue
+
+            # Relay → GS (ciano chiaro)
+            relay_dest = mapping.get(relay_id, "NO_TX")
+            if relay_dest.startswith("g"):
+                g = next(g for g in slot.gs if g.id == relay_dest)
+                ax.plot([v.x, g.x], [v.y, g.y], [v.z, g.z],
+                        color='deepskyblue', linewidth=2.0, alpha=0.9, label=None)
+
+        elif dest.startswith("g"):
+            # Collegamento diretto U2G (ciano)
             g = next(g for g in slot.gs if g.id == dest)
             ax.plot([u.x, g.x], [u.y, g.y], [u.z, g.z],
-                    color='cyan', linewidth=2.0, alpha=0.9)
+                    color='cyan', linewidth=2.0, alpha=0.8, label=None)
+
         elif dest.startswith("u"):
+            # Collegamento U2U non relay (fallback)
             v = next(v for v in slot.uav if v.id == dest)
             ax.plot([u.x, v.x], [u.y, v.y], [u.z, v.z],
-                    color='orange', linewidth=1.5, alpha=0.8)
+                    color='orange', linewidth=1.5, alpha=0.7, linestyle='--', label=None)
 
     ax.legend(loc='upper right')
 
@@ -87,11 +110,11 @@ def visualize():
 
     assignments = run_inference(policy, scn)
 
-    fig = plt.figure(figsize=(7, 6))
+    fig = plt.figure(figsize=(8, 7))
     ax = fig.add_subplot(111, projection='3d')
 
-    for slot, (mapping, _) in zip(scn.slots, assignments):
-        draw_slot(ax, slot, mapping, slot.t, len(scn.slots))
+    for slot, (mapping, relay_plan) in zip(scn.slots, assignments):
+        draw_slot(ax, slot, mapping, relay_plan, slot.t, len(scn.slots))
         plt.pause(0.05)
 
     plt.show()

@@ -117,12 +117,23 @@ def load_scenario(path: Path) -> Scenario:
         slots.append(Slot(t=s["t"], uav=u, gs=g, links=l, u2u=u2u))
     return Scenario(meta=obj.get("meta", {}), slots=slots)
 
-def save_submission(meta: Dict[str, str], assignments: List[Dict[str, str]], out: Path):
-    out.write_text(json.dumps({
+def save_submission(meta: Dict[str, str],
+                    assignments: List[Dict[str, str]],
+                    relays: Optional[List[Dict[str, Dict]]] = None,
+                    out: Path = Path("submission.json")):
+    """
+    Salva mappa UAV→dest + piano relay opzionale in submission.json.
+    """
+    data = {
         "meta": meta,
-        "assignments": [{"t": t, "map": m} for t, m in enumerate(assignments)]
-    }, ensure_ascii=False, indent=2))
-
+        "assignments": []
+    }
+    for t, mapping in enumerate(assignments):
+        record = {"t": t, "map": mapping}
+        if relays and t < len(relays):
+            record["relay"] = relays[t]
+        data["assignments"].append(record)
+    out.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 # ================================================
 # = CAPITOLO 2: Generatore sintetico + valid util =
@@ -260,6 +271,13 @@ class DataComEnv:
                 lk1 = u2u_map.get((u.id, dest))
                 relay_dest = mapping.get(dest, "NO_TX")
 
+                # === Carica parametri relay dal config ===
+                cfg_path = Path("config_env.json")
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+                relay_cfg = cfg.get("relay_policy", {})
+                cost_ratio_accept = relay_cfg.get("cost_ratio_accept", 1.3)
+                bonus_rew = relay_cfg.get("bonus_reward", 0.0)
+
                 # valido solo se il relay ha GS finale
                 if lk1 and relay_dest.startswith("g"):
                     lk2 = link_map.get((dest, relay_dest))
@@ -272,8 +290,8 @@ class DataComEnv:
                     direct_links = [lk for lk in slot.links if lk.uav_id == u.id]
                     cost_direct = min((lk.w1 for lk in direct_links), default=1e9)
 
-                    # il relay è accettato se è entro il 20% del costo diretto
-                    if cost_relay * 0.8 < cost_direct:
+                    # accetta relay se non è molto peggiore del diretto
+                    if cost_relay < cost_direct * cost_ratio_accept:
                         cons = (lk1["r"] + lk2.w2) / 60.0
                         if gs_capacity[relay_dest] - cons < -1e-6:
                             violations += 1.0
@@ -282,6 +300,7 @@ class DataComEnv:
                         throughput += min(u.f1, lk2.w2 * 0.8) * (1.0 + np.random.randn() * 0.05)
                         latency += max(1.0, cost_relay * 0.05)
                         dist_sum += cost_relay
+                        reward += bonus_rew  # bonus per relay riuscito
                     else:
                         # relay inutile
                         violations += 0.5
@@ -291,7 +310,6 @@ class DataComEnv:
                     # relay orfano (non termina su GS)
                     violations += 1.0
                     latency += 15.0
-
             # 3️⃣ Nessuna trasmissione
             else:
                 latency += 5.0
@@ -412,6 +430,9 @@ def compute_augmented_edges(slot: Slot, relay_factor: float = 0.9
     """
     link_map = {(lk.uav_id, lk.gs_id): lk for lk in slot.links}
     u2u_idx = _build_u2u_index(slot)
+    cfg_path = Path("config_env.json")
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    cfg_relay = cfg.get("relay_policy", {})
 
     aug_info: Dict[Tuple[str,str], AugInfo] = {}
     overrides: Dict[Tuple[str,str], Tuple[float,float]] = {}
@@ -429,7 +450,9 @@ def compute_augmented_edges(slot: Slot, relay_factor: float = 0.9
                 continue
             # rate via relay = λ * min(r_uv, w2(v,g))
             via_rate = relay_factor * min(float(r_uv), float(lk_vg.w2))
-            if via_rate > best_rate * 0.9:
+            via_thresh = cfg_relay.get("via_rate_threshold", 0.9)
+
+            if via_rate > best_rate * via_thresh:
                 best_rate = via_rate
                 best_dist = float(d_uv) + float(lk_vg.w1)
                 best_v = v_id
@@ -942,10 +965,15 @@ def safety_project_aug(slot: Slot,
 
 def run_inference(policy: PPOPolicy, scenario: Scenario, device: torch.device,
                   relay_factor: float = 0.8, cap_scale: float = 30.0, relay_scale: float = 30.0
-                  ) -> List[Dict[str,str]]:
+                  ) -> Tuple[List[Dict[str,str]], List[Dict[str,Dict]]]:
+    """
+    Esegue inferenza slot per slot, restituendo sia mapping UAV→GS
+    che piano relay (u→v→g).
+    """
     policy.to(device)
     env = DataComEnv(gamma=0.02)
     assignments: List[Dict[str, str]] = []
+    relay_plans: List[Dict[str, Dict]] = []
     env.prev_choice = {}
     for slot in scenario.slots:
         err = validate_slot(slot)
@@ -956,9 +984,10 @@ def run_inference(policy: PPOPolicy, scenario: Scenario, device: torch.device,
         mapping, relay_plan = safety_project_aug(slot, probs, aug,
                                                  cap_scale=cap_scale, relay_scale=relay_scale)
         assignments.append(mapping)
+        relay_plans.append(relay_plan)
         _r, _info = env.step(slot, mapping, aug_info=aug if aug else None,
                              relay_plan=relay_plan, cap_scale=cap_scale)
-    return assignments
+    return assignments, relay_plans
 
 
 # ====================================
@@ -1123,14 +1152,15 @@ def main():
         else:
             print("[Infer] ⚠ Nessun checkpoint trovato, uso policy casuale.")
 
-        assignments = run_inference(
+        assignments, relay_plans = run_inference(
             policy, scn, device,
             relay_factor=cfg.get("training", {}).get("relay_factor", 0.8),
             cap_scale=cfg.get("training", {}).get("cap_scale", 30.0),
             relay_scale=cfg.get("training", {}).get("relay_scale", 30.0)
         )
 
-        save_submission({"solver": "gnn_ppo_ctde_loco_u2u"}, assignments, out_path)
+        save_submission({"solver": "gnn_ppo_ctde_loco_u2u"}, assignments, relay_plans, out_path)
+
         print(f"[OK] Submission salvata -> {out_path}")
 
     # === EVAL MODE ===

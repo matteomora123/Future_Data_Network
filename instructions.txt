@@ -23,4 +23,20 @@ e violations pesa tantissimo (-30 * violazioni per UAV).
 | 30–60       | → cresce sopra 50–100 | Inizia a ottimizzare throughput/latenza |
 | >100        | stabilizza su 90–120  | Policy stabile e performante            |
 
+verifica presenza collegamenti u2u in dataset.json
+import json, pathlib
+
+# Sei già in dataset_addestramento/, quindi il file è "dataset.json"
+path = pathlib.Path("dataset.json")
+
+if not path.exists():
+    raise FileNotFoundError(f"File non trovato: {path.resolve()}")
+
+data = json.loads(path.read_text())
+u2u_total = sum(len(s.get("u2u", [])) for s in data["slots"])
+print(f"Totale link U2U trovati nel dataset: {u2u_total}")
+
+if u2u_total > 0:
+    s0 = data["slots"][0]
+    print(f"Esempio slot 0: {len(s0.get('u2u', []))} link U2U")
 

@@ -6,7 +6,7 @@ Legge automaticamente percorsi e parametri da config_env.json.
 Compatibile con datacom_full.py e dataset_addestramento/dataset.json.
 """
 
-import json, torch, numpy as np
+import json, torch, numpy as np, sys
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datacom_full import (
@@ -27,6 +27,7 @@ CKPT_PATH = Path(config["paths"]["checkpoint_file"])
 RELAY_FACTOR = config["training"].get("relay_factor", 0.8)
 CAP_SCALE = config["training"].get("cap_scale", 30.0)
 RELAY_SCALE = config["training"].get("relay_scale", 30.0)
+
 
 # === Funzioni principali ===
 def run_inference(policy, scn):
@@ -98,7 +99,7 @@ def draw_slot(ax, slot, mapping, relay_plan, idx, total):
     ax.legend(loc='upper right')
 
 
-def visualize():
+def visualize(save_mp4=False):
     """Esegue inferenza e visualizza il comportamento del modello addestrato"""
     print(f"[Config] Dataset base: {SCN_PATH}")
     print(f"[Config] Checkpoint:   {CKPT_PATH}")
@@ -113,12 +114,37 @@ def visualize():
     fig = plt.figure(figsize=(8, 7))
     ax = fig.add_subplot(111, projection='3d')
 
+    if save_mp4:
+        import cv2
+        out_path = Path("viz_output.mp4")
+        fps = 10
+        frame_size = (800, 700)
+        writer = cv2.VideoWriter(str(out_path),
+                                 cv2.VideoWriter_fourcc(*'mp4v'),
+                                 fps, frame_size)
+        print(f"[Video] Registrazione attiva → {out_path}")
+
     for slot, (mapping, relay_plan) in zip(scn.slots, assignments):
         draw_slot(ax, slot, mapping, relay_plan, slot.t, len(scn.slots))
         plt.pause(0.05)
+
+        if save_mp4:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            frame = np.frombuffer(renderer.buffer_rgba(), dtype=np.uint8)
+            frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+            frame = frame[:, :, :3]  # elimina canale alfa
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            frame = cv2.resize(frame, frame_size)
+            writer.write(frame)
+
+    if save_mp4:
+        writer.release()
+        print(f"[Video] Salvataggio completato: {out_path.resolve()}")
 
     plt.show()
 
 
 if __name__ == "__main__":
-    visualize()
+    save_mp4 = "--mp4" in sys.argv
+    visualize(save_mp4=save_mp4)
